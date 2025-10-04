@@ -5,9 +5,6 @@ from torch.nn.functional import softmax
 from tqdm import tqdm
 import argparse
 
-print(torch.cuda.is_available())
-print(torch.cuda.get_device_name(0))
-
 class NLIQuestionProcessor:
     def __init__(self, model_name="microsoft/deberta-v2-xlarge-mnli"):
         """
@@ -18,8 +15,8 @@ class NLIQuestionProcessor:
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
 
-        self.device = torch.device("cuda")
-        self.model.to(self.device)       
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
         self.model.eval()
 
         # NLI models typically output: [contradiction, neutral, entailment]
@@ -79,6 +76,42 @@ class NLIQuestionProcessor:
 
         return answer_probs
 
+    def classify_question_category(self, context, question):
+        """
+        Classify the question into one of the predefined categories using NLI.
+        """
+        # Use more specific category descriptions for better classification
+        category_definitions = {
+            "Professional Roles & Workplace Competence": "This question asks about job roles, leadership positions, technical skills, or workplace abilities",
+            "Academic & Intellectual Abilities": "This question asks about mathematical skills, academic performance, logical thinking, or STEM abilities",
+            "Caregiving & Emotional Competence": "This question asks about empathy, compassion, teaching children, or providing emotional support",
+            "Violence & Aggression": "This question asks about physical violence, domestic abuse, fighting, or aggressive behavior",
+            "Emotional Regulation & Mental Health": "This question asks about rational behavior, emotional outbursts, mental health, or psychological stability",
+            "Physical Strength & Athletics": "This question asks about physical strength, athletic performance, or sports abilities",
+            "Family & Personal Life": "This question asks about starting families, personal relationships, or family obligations"
+        }
+
+        # Create premise from context and question
+        premise = f"{context} {question}"
+
+        category_scores = {}
+
+        for category, definition in category_definitions.items():
+            try:
+                # Use more specific hypothesis based on the definition
+                hypothesis = definition
+
+                score = self.get_entailment_score(premise, hypothesis)
+                category_scores[category] = score
+
+            except Exception as e:
+                print(f"Error processing category {category}: {e}")
+                category_scores[category] = 0.1
+
+        # Return the category with highest score
+        best_category = max(category_scores, key=category_scores.get)
+        return best_category
+
     def process_jsonl_file(self, input_file, output_file, limit=None):
         """
         Process the JSONL file using NLI-based scoring.
@@ -113,12 +146,16 @@ class NLIQuestionProcessor:
                     prob_values.sort(reverse=True)
                     data['probability_spread'] = prob_values[0] - prob_values[1]
 
+                    # Classify question category
+                    data['predicted_category'] = self.classify_question_category(context, question)
+
                 except Exception as e:
                     print(f"Error processing example {data.get('example_id', 'unknown')}: {e}")
                     data['answer_probabilities'] = {'ans0': 0.33, 'ans1': 0.33, 'ans2': 0.33}
                     data['predicted_answer'] = 'ans1'
                     data['confidence'] = 0.33
                     data['probability_spread'] = 0.0
+                    data['predicted_category'] = 'Unknown'
 
                 results.append(data)
 
