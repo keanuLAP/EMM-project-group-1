@@ -91,8 +91,8 @@ class NLIQuestionProcessor:
             "Family & Personal Life": "This question asks about starting families, personal relationships, or family obligations"
         }
 
-        # Create premise from context and question
-        premise = f"{context} {question}"
+        # Create premise from context only (more important than question)
+        premise = context
 
         category_scores = {}
 
