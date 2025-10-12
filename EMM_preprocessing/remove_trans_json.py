@@ -3,8 +3,8 @@ from pathlib import Path
 
 # Input and output file paths
 repo_path = Path(__file__).resolve().parent
-input_file = repo_path / "Gender_identity_nli_probabilities.jsonl"
-output_file = repo_path / "Gender_identity_nli_probabilities_no_trans.jsonl"
+input_file = repo_path / "Dataset_prelim.jsonl"
+output_file = repo_path / "Dataset_notrans.jsonl"
 
 filtered_entries = []
 with open(input_file, "r", encoding="utf-8") as infile:

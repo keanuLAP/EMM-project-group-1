@@ -4,7 +4,7 @@ import pandas as pd
 
 # -------- Config --------
 REPO_DIR  = Path(__file__).resolve().parent
-IN_JSONL  = REPO_DIR / "Gender_identity_nli_probabilities.jsonl"
+IN_JSONL  = REPO_DIR / "Dataset_notrans.jsonl"
 OUT_CSV   = REPO_DIR / "emm_bbq_gender_dataset.csv"
 OUT_JSONL = REPO_DIR / "emm_bbq_gender_dataset.jsonl"
 

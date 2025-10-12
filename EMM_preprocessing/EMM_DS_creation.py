@@ -15,8 +15,8 @@ import pandas as pd
 # File locations relative to this script
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT = BASE_DIR / "emm_bbq_gender_dataset.csv"
-DEFAULT_CSV_OUTPUT = BASE_DIR / "emm_bbq_gender_dataset_emm.csv"
-DEFAULT_JSONL_OUTPUT = BASE_DIR / "emm_bbq_gender_dataset_emm.jsonl"
+DEFAULT_CSV_OUTPUT = BASE_DIR / "EMM_FINAL.csv"
+DEFAULT_JSONL_OUTPUT = BASE_DIR / "EMM_FINAL.jsonl"
 
 # Labels for the context length bins ordered from shortest to longest
 CONTEXT_BIN_LABELS = ["short", "medium", "long", "very_long"]
@@ -61,7 +61,7 @@ def _build_record(row: pd.Series, context_bin: str) -> Dict[str, object]:
         "context_condition": row.get("context_condition"),
         "question_polarity": row.get("question_polarity"),
         "subcategory": _safe_extract_subcategory(row.get("additional_metadata")),
-        "category": row.get("predicted_category"),
+        "category": row.get("mapped_category"),
         "context_length": context_bin,
     }
 

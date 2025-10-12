@@ -15,6 +15,13 @@ import numpy as np
 import pandas as pd
 
 
+# ---- Postprocessing knobs ----
+JACCARD_THRESH = 0.99     # masks considered near-duplicates if J >= 0.95
+DELTA_EPS = 1e-4           # max allowed |Δ| difference when collapsing
+COV_EPS = 1e-3           # max allowed coverage difference when collapsing
+CATEGORY_COL = "category"  # for per-category summary
+
+
 REPO_ROOT = Path(__file__).resolve().parent
 BEAMSEARCH_PATH = REPO_ROOT / "Beaamsearch"
 if str(BEAMSEARCH_PATH) not in sys.path:
@@ -192,7 +199,7 @@ def load_dataset(dataset_path: Path) -> pd.DataFrame:
 
 
 def run() -> None:
-    dataset_path = Path("emm_bbq_gender_dataset_emm.jsonl")
+    dataset_path = Path("EMM_FINAL.jsonl")
     df = load_dataset(dataset_path)
 
     descriptives = {
@@ -246,34 +253,53 @@ def run() -> None:
         print("Diagnostics:", considered_subgroups)
         return
 
-    formatted = extract_ranked_subgroups(result_emm)
+    formatted = extract_ranked_subgroups(result_emm, global_mean=general_params["global_mean"])
     if not formatted:
         print("Beam search returned results but formatting failed.")
         print(result_emm)
     else:
-        print("Top beam search results:")
-        for entry in formatted:
-            print(f"Rank {entry.pop('rank')}:")
-            description = entry.pop("description")
-            print("  Conditions:", description)
-            print(
-                "  Metrics:",
-                {k: v for k, v in entry.items() if k not in {"sg_idx"}},
-            )
+        # sort primary list by (WRAcc, |t|, shorter rule)
+        formatted.sort(key=lambda x: (x.get("wracc", 0.0),
+                                      x.get("abs_t_stat", 0.0),
+                                      -len(x["raw_description"])), reverse=True)
+
+        # 1) Collapse near-duplicates
+        collapsed = collapse_near_duplicates(formatted, df)
+
+        print("\n=== Overall top (post-collapse) ===")
+        for e in collapsed[:10]:
+            print(f"#{e['rank']:2d}", e['description'], {"wracc": e["wracc"], "delta": e["delta"], "sg_fraction": e["sg_fraction"], "|t|": e["abs_t_stat"]})
+
+        # 2) Split by direction
+        male_list, female_list = split_by_direction(collapsed, general_params["global_mean"])
+
+        # 3) Per-category summary
+        cat_table = per_category_summary(df, target="Y", category_col=CATEGORY_COL)
+
+        # ---- Print nicely ----
+        print("\n=== Male-favoring (Δ>0) ===")
+        for e in male_list[:10]:
+            print(f"#{e['rank']:2d}", e['description'], {"wracc": e["wracc"], "delta": e["delta"], "sg_fraction": e["sg_fraction"], "|t|": e["abs_t_stat"]})
+
+        print("\n=== Female-favoring (Δ<0) ===")
+        for e in female_list[:10]:
+            print(f"#{e['rank']:2d}", e['description'], {"wracc": e["wracc"], "delta": e["delta"], "sg_fraction": e["sg_fraction"], "|t|": e["abs_t_stat"]})
+
+        print("\n=== Per-category summary (top 10 by |delta|) ===")
+        cat_top = cat_table.reindex(cat_table["delta"].abs().sort_values(ascending=False).index).head(10)
+        print(cat_top.to_string(index=False))
     print("Diagnostics:", considered_subgroups)
 
 
-def extract_ranked_subgroups(result_emm: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Convert the beam search result frame into a list of readable entries."""
+def extract_ranked_subgroups(result_emm: pd.DataFrame, global_mean: float) -> List[Dict[str, Any]]:
     if "sg" not in result_emm.columns:
         return []
 
-    tidy_results: List[Dict[str, Any]] = []
+    out: List[Dict[str, Any]] = []
     for sg_id in sorted(result_emm["sg"].dropna().unique()):
         sg_slice = result_emm[result_emm["sg"] == sg_id]
         if sg_slice.empty or sg_slice.shape[0] < 2:
             continue
-
         desc_row = (
             sg_slice[sg_slice.index == "description"]
             .iloc[0]
@@ -285,26 +311,25 @@ def extract_ranked_subgroups(result_emm: pd.DataFrame) -> List[Dict[str, Any]]:
             .drop(labels=["sg"], errors="ignore")
         )
 
-        description = {}
+        raw_desc = {}
         for col, val in desc_row.items():
             if pd.isna(val) or col in {"abs_t_stat", "mean", "q"}:
                 continue
-            description[col] = _format_condition(col, val)
-        metrics = {
-            col: _normalise_value(val)
-            for col, val in qual_row.items()
-            if pd.notna(val) and col not in {"sg_idx", "temp_qm_value"}
-        }
-
-        tidy_results.append(
-            {
-                "rank": int(sg_id) + 1,
-                "description": description,
-                **metrics,
-            }
-        )
-
-    return tidy_results
+            raw_desc[col] = val
+        pretty = {col: _format_condition(col, val) for col, val in raw_desc.items()}
+        metrics = {k: _normalise_value(v)
+                   for k, v in qual_row.items()
+                   if pd.notna(v) and k not in {"sg_idx", "temp_qm_value"}}
+        mean = float(metrics.get("mean", float("nan")))
+        delta = mean - float(global_mean) if not math.isnan(mean) else float("nan")
+        metrics["delta"] = delta
+        out.append({
+            "rank": int(sg_id) + 1,
+            "description": pretty,
+            "raw_description": raw_desc,
+            **metrics,
+        })
+    return out
 
 
 def _normalise_value(value: Any) -> Any:
@@ -325,6 +350,90 @@ def _format_condition(attribute: str, raw_value: Any) -> str:
     if isinstance(raw_value, list):
         return f"{attribute} in {raw_value}"
     return f"{attribute} == {raw_value}"
+
+
+def build_mask_from_raw_desc(df: pd.DataFrame, raw_desc: Dict[str, Any]) -> np.ndarray:
+    mask = np.ones(len(df), dtype=bool)
+    for attr, raw in raw_desc.items():
+        col = df[attr].astype(object)
+        if isinstance(raw, tuple) and len(raw) == 2:
+            comparator, literal = raw
+            if comparator == 1.0:
+                mask &= (col == literal).to_numpy()
+            elif comparator == 0.0:
+                mask &= (col != literal).to_numpy()
+            else:
+                raise ValueError(f"Unknown comparator {comparator} for {attr}")
+        elif isinstance(raw, list):
+            mask &= col.isin(raw).to_numpy()
+        else:
+            mask &= (col == raw).to_numpy()
+    return mask
+
+
+def jaccard(a: np.ndarray, b: np.ndarray) -> float:
+    inter = np.logical_and(a, b).sum()
+    union = np.logical_or(a, b).sum()
+    return 0.0 if union == 0 else inter / union
+
+
+def collapse_near_duplicates(entries: List[Dict[str, Any]],
+                             df: pd.DataFrame,
+                             jaccard_thresh: float = JACCARD_THRESH,
+                             delta_eps: float = DELTA_EPS,
+                             cov_eps: float = COV_EPS) -> List[Dict[str, Any]]:
+    kept: List[Dict[str, Any]] = []
+    kept_masks: List[np.ndarray] = []
+    masks = [build_mask_from_raw_desc(df, e["raw_description"]) for e in entries]
+    for e, m in zip(entries, masks):
+        is_dup = False
+        for km, ke in zip(kept_masks, kept):
+            J = jaccard(m, km)
+            cov_diff = abs(e.get("sg_fraction", 0.0) - ke.get("sg_fraction", 0.0))
+            delta_diff = abs(e.get("delta", float("nan")) - ke.get("delta", float("nan")))
+            if J >= jaccard_thresh and (math.isnan(delta_diff) or delta_diff <= delta_eps) and cov_diff <= cov_eps:
+                is_dup = True
+                break
+        if not is_dup:
+            kept.append(e)
+            kept_masks.append(m)
+    kept.sort(key=lambda x: (x.get("wracc", 0.0),
+                             x.get("abs_t_stat", 0.0),
+                             -len(x["raw_description"])), reverse=True)
+    for i, e in enumerate(kept, 1):
+        e["rank"] = i
+    return kept
+
+
+def split_by_direction(entries: List[Dict[str, Any]], global_mean: float) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    _ = global_mean
+    pos, neg = [], []
+    for e in entries:
+        delta = e.get("delta", float("nan"))
+        if math.isnan(delta) or delta == 0.0:
+            continue
+        (pos if delta > 0 else neg).append(e)
+    for L in (pos, neg):
+        L.sort(key=lambda x: (x.get("wracc", 0.0),
+                              x.get("abs_t_stat", 0.0),
+                              -len(x["raw_description"])), reverse=True)
+        for i, e in enumerate(L, 1):
+            e["rank"] = i
+    return pos, neg
+
+
+def per_category_summary(df: pd.DataFrame, target: str = "Y", category_col: str = CATEGORY_COL) -> pd.DataFrame:
+    if category_col not in df.columns:
+        raise ValueError(f"'{category_col}' not found for per-category summary.")
+    g = df.groupby(category_col, dropna=False)[target]
+    stats = g.agg(n="size", mean="mean", var=lambda s: float(np.var(s, ddof=1)) if len(s) > 1 else 0.0).reset_index()
+    N = len(df); global_mean = float(df[target].mean())
+    stats["se"] = (stats["var"] / stats["n"]).pow(0.5).astype(float)
+    stats["delta"] = stats["mean"] - global_mean
+    stats["ci_lo"] = stats["mean"] - 1.96 * stats["se"]
+    stats["ci_hi"] = stats["mean"] + 1.96 * stats["se"]
+    stats["comp_mean"] = ((N * global_mean) - (stats["n"] * stats["mean"])) / (N - stats["n"]).replace({0: np.nan})
+    return stats.sort_values(by="delta", ascending=False)
 
 
 if __name__ == "__main__":
