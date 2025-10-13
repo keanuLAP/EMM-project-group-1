@@ -13,7 +13,7 @@ import pysubgroup as ps
 
 # ---- Configuration ---------------------------------------------------------
 
-DATA_PATH = Path("EMM_FINAL.jsonl")
+DATA_PATH = Path("EMM_final_dataset/EMM_FINAL.jsonl")
 TARGET_COL = "Y"
 
 # Beam search knobs
@@ -30,15 +30,13 @@ MIN_ABS_SIZE = 40        # > 30 for stability on ~4.8k rows
 TOP_PRE = 50
 
 # Duplicate collapse tolerances
-JACCARD_THRESH = 0.95
+JACCARD_THRESH = 0.85
 DELTA_EPS = 0.01
 COV_EPS = 0.02
 
 # Dominance pruning
-INCLUSION_TOL = 0.98
+INCLUSION_TOL = 0.9
 
-# Negations: create boolean complements only for these columns
-NEGATION_COLS = {"category"}   # add "context_condition" if you want
 
 # ---- Data containers -------------------------------------------------------
 
@@ -145,51 +143,7 @@ def build_search_space(df: pd.DataFrame,
         values.sort(key=lambda v: str(v))
         for v in values:
             search_space.append(ps.EqualitySelector(col, v))
-
-        # Optional "not equals" selectors for chosen columns
-        if include_negations and col in NEGATION_COLS:
-            for v in values:
-                search_space.append(NotEqualsSelector(col, v))
     return search_space
-
-
-
-class NotEqualsSelector:
-    """
-    Duck-typed selector for nominal "attr != value".
-    Compatible with pysubgroup's expectations:
-      - .covers(df) -> boolean mask/Series
-      - .attribute_name, .value
-      - .selectors -> iterable of leaf selectors (self)
-      - __eq__/__hash__ for containment checks in beam expansion
-    """
-    __slots__ = ("attribute_name", "value")
-
-    def __init__(self, attribute_name: str, value: Any):
-        self.attribute_name = attribute_name
-        self.value = value
-
-    # --- API expected by pysubgroup ---
-    def covers(self, df: pd.DataFrame):
-        return df[self.attribute_name] != self.value
-
-    @property
-    def selectors(self):
-        # behave like a leaf Conjunction: flattening code will iterate this
-        return (self,)
-
-    # --- Equality & hashing (used in "sel in last_sg.selectors", set ops, etc.) ---
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, NotEqualsSelector):
-            return False
-        return (self.attribute_name == other.attribute_name) and (self.value == other.value)
-
-    def __hash__(self) -> int:
-        return hash(("!=", self.attribute_name, self.value))
-
-    # --- Pretty print ---
-    def __str__(self):
-        return f"{self.attribute_name} != {self.value}"
 
 
 # ---- Quality function ------------------------------------------------------
@@ -309,12 +263,6 @@ def subgroup_description(sg: ps.Subgroup) -> Dict[str, str]:
         selectors = []
 
     for selector in selectors:
-        # our custom negation
-        if isinstance(selector, NotEqualsSelector):
-            attr = selector.attribute_name
-            val = selector.value
-            desc[attr] = f"{attr} != {val}"
-            continue
 
         # built-in equality
         if isinstance(selector, ps.EqualitySelector):
@@ -528,7 +476,6 @@ def pareto_front(rows: Iterable[SubgroupRow], eps_cov=0.01, eps_delta=0.005, eps
             out.append(r)
     return sorted(out, key=lambda r: (r.wracc, r.abs_t, -r.rule_len), reverse=True)
 
-
 def inclusion_ratio(a: np.ndarray, b: np.ndarray) -> float:
     denom = a.sum()
     if denom == 0:
@@ -609,6 +556,45 @@ def print_category_summary(df: pd.DataFrame) -> None:
     print(summary.head(10).to_string(index=False, float_format=lambda x: f"{x:.4f}"))
 
 
+def _serialise_rows(rows: Iterable[SubgroupRow]) -> List[Dict[str, Any]]:
+    serialised: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows, 1):
+        serialised.append(
+            {
+                "rank": idx,
+                "description": row.description,
+                "mask": row.mask.astype(int).tolist(),
+                "wracc": row.wracc,
+                "delta": row.delta,
+                "coverage": row.sg_size,
+                "fraction": row.sg_fraction,
+                "t_stat": row.t_stat,
+            }
+        )
+    return serialised
+
+
+def save_results(rows: List[SubgroupRow], base_name: Path) -> None:
+    records = _serialise_rows(rows)
+    base_path = Path(base_name)
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    jsonl_path = base_path.with_suffix(".jsonl")
+    csv_path = base_path.with_suffix(".csv")
+
+    with jsonl_path.open("w", encoding="utf-8") as jsonl_file:
+        for record in records:
+            jsonl_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    if records:
+        df = pd.DataFrame(records)
+    else:
+        df = pd.DataFrame(columns=["rank", "description", "mask", "wracc", "delta", "coverage", "fraction", "t_stat"])
+    if not df.empty:
+        df["description"] = df["description"].apply(lambda d: json.dumps(d, ensure_ascii=False))
+        df["mask"] = df["mask"].apply(lambda m: json.dumps(m))
+    df.to_csv(csv_path, index=False)
+
+
 # ---- Orchestration --------------------------------------------------------
 
 def main() -> None:
@@ -625,9 +611,10 @@ def main() -> None:
     
     dedup = collapse_near_duplicates(inc)
     print_section(f"Post-duplicate collapse ({len(dedup)} retained of {len(inc)})", dedup)
-    
+
     pruned = dominance_prune(dedup)
     print_section(f"Dominance-pruned ({len(pruned)} retained of {len(dedup)})", pruned)
+    save_results(pruned, Path("EMM_results/EMM_results"))
 
     # pareto = pareto_front(pruned)
     # print_section(f"Pareto front ({len(pareto)} retained of {len(pruned)})", pareto)
