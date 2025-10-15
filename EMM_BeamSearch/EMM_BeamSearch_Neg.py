@@ -30,7 +30,7 @@ MIN_ABS_SIZE = 40        # > 30 for stability on ~4.8k rows
 TOP_PRE = 50
 
 # Duplicate collapse tolerances
-JACCARD_THRESH = 0.85
+JACCARD_THRESH = 0.95
 DELTA_EPS = 0.01
 COV_EPS = 0.02
 
@@ -423,7 +423,7 @@ def jaccard(a: np.ndarray, b: np.ndarray) -> float:
     union = np.logical_or(a, b).sum()
     return 0.0 if union == 0 else inter / union
 
-def collapse_by_inclusion(rows: List[SubgroupRow], inclusion_tol: float = 0.95) -> List[SubgroupRow]:
+def collapse_by_inclusion(rows: List[SubgroupRow], inclusion_tol: float = 0.995) -> List[SubgroupRow]:
     """
     Globally collapse by inclusion, independent of input order.
 

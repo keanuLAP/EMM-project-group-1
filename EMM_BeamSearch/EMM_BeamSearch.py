@@ -30,7 +30,7 @@ MIN_ABS_SIZE = 40        # > 30 for stability on ~4.8k rows
 TOP_PRE = 50
 
 # Duplicate collapse tolerances
-JACCARD_THRESH = 0.85
+JACCARD_THRESH = 0.95
 DELTA_EPS = 0.01
 COV_EPS = 0.02
 
